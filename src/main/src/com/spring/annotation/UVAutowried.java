@@ -2,7 +2,7 @@ package com.spring.annotation;
 /*
  * @author uv
  * @date 2018/9/29 10:00
- * 注入
+ * 注入,通过类型注入
  */
 
 import java.lang.annotation.Documented;
@@ -16,5 +16,4 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
 public @interface UVAutowried {
-    String value() default "";
 }

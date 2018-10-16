@@ -9,18 +9,15 @@ import com.alibaba.fastjson.JSON;
 import com.spring.annotation.UVAutowried;
 import com.spring.annotation.UVController;
 import com.spring.annotation.UVRequestMapping;
-import com.spring.annotation.UVRequestParam;
 import com.spring.annotation.UVResponseBody;
 import com.spring.annotation.UVService;
 import com.spring.core.MethodHandler;
-import com.spring.core.UVModel;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Parameter;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -34,6 +31,8 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
+import org.reflections.Reflections;
+import org.reflections.scanners.MethodParameterNamesScanner;
 
 public class UVDispatcherServlet extends HttpServlet {
 
@@ -41,8 +40,10 @@ public class UVDispatcherServlet extends HttpServlet {
     private Properties properties = new Properties();
     //存放所有带注解的类
     private List<String> classNameList = new ArrayList<>();
-    //IOC容器
-    private Map<String, Object> IOC = new HashMap<>();
+    //IOC容器,通过类型注入
+    private Map<String, Object> IOCByType = new HashMap<>();
+    //当通过类型找不到对应实例时，通过名称注入(名称相同时会覆盖之前的值，这里就不处理了)
+    private Map<String, Object> IOCByName = new HashMap<>();
     //url 到controller方法的映射
     private Map<String, MethodHandler> urlHandler = new HashMap<>();
 
@@ -117,7 +118,7 @@ public class UVDispatcherServlet extends HttpServlet {
                 Class<?> clazz = Class.forName(className);
                 //IOC容器key命名规则：1.默认类名首字母小写  2.使用用户自定义名，如 @UVService("abc") 3.如果service实现了接口，可以使用接口作为key
 
-                //controler,service注解类
+                //controller,service注解类
                 if (clazz.isAnnotationPresent(UVController.class)) {
                     UVController uvController = clazz.getAnnotation(UVController.class);
                     String beanName = uvController.value().trim();
@@ -125,7 +126,11 @@ public class UVDispatcherServlet extends HttpServlet {
                     if (StringUtils.isBlank(beanName)) {
                         beanName = lowerFirstCase(clazz.getSimpleName());
                     }
-                    IOC.put(beanName, clazz.newInstance());
+                    //byName
+                    Object instance = clazz.newInstance();
+                    IOCByName.put(beanName, instance);
+                    //byType
+                    IOCByType.put(clazz.getName(), instance);
                 } else if (clazz.isAnnotationPresent(UVService.class)) {
                     UVService uvService = clazz.getAnnotation(UVService.class);
                     String beanName = uvService.value().trim();
@@ -133,14 +138,16 @@ public class UVDispatcherServlet extends HttpServlet {
                     if (StringUtils.isBlank(beanName)) {
                         beanName = lowerFirstCase(clazz.getSimpleName());
                     }
-                    Object object = clazz.newInstance();
-                    //将实例化的对象放到到容器中
-                    IOC.put(beanName, object);
+                    //byName
+                    Object instance = clazz.newInstance();
+                    IOCByName.put(beanName, instance);
+                    //byType
+                    IOCByType.put(clazz.getName(), instance);
                     //如果service实现了接口，可以使用接口作为key
-                    //取到service实现的接口
                     Class<?>[] interfaces = clazz.getInterfaces();
                     for (Class<?> interf : interfaces) {
-                        IOC.put(lowerFirstCase(interf.getSimpleName()), object);
+                        IOCByName.put(lowerFirstCase(interf.getSimpleName()), instance);
+                        IOCByType.put(interf.getName(), instance);
                     }
                 } else {
                     continue;
@@ -153,10 +160,10 @@ public class UVDispatcherServlet extends HttpServlet {
 
     //4、实现@UVAutowried自动注入
     private void doAutowried() {
-        if (IOC.isEmpty()) {
+        if (IOCByName.isEmpty() && IOCByType.isEmpty()) {
             return;
         }
-        for (Entry<String, Object> entry : IOC.entrySet()) {
+        for (Entry<String, Object> entry : IOCByType.entrySet()) {
             //获取变量
             Field[] fields = entry.getValue().getClass().getDeclaredFields();
             for (Field field : fields) {
@@ -166,15 +173,20 @@ public class UVDispatcherServlet extends HttpServlet {
                 if (!field.isAnnotationPresent(UVAutowried.class)) {
                     continue;
                 }
-
-                String beanName = field.getAnnotation(UVAutowried.class).value().trim();
-                //如果value为空，则使用根据变量名注入，否则根据定义的value注入
-                if (StringUtils.isBlank(beanName)) {
-                    beanName = field.getType().getName();
+                Object instance = null;
+                String beanName = field.getType().getName();
+                String simpleName = lowerFirstCase(field.getType().getSimpleName());
+                //首先根据Type注入，没有实例时根据Name，否则抛出异常
+                if (IOCByType.containsKey(beanName)) {
+                    instance = IOCByType.get(beanName);
+                } else if (IOCByName.containsKey(simpleName)) {
+                    instance = IOCByName.get(simpleName);
+                } else {
+                    throw new RuntimeException("not find class to autowire");
                 }
                 try {
                     //向obj对象的这个Field设置新值value,依赖注入
-                    field.set(entry.getValue(), IOC.get(beanName));
+                    field.set(entry.getValue(), instance);
                 } catch (IllegalAccessException e) {
                     e.printStackTrace();
                 }
@@ -184,10 +196,10 @@ public class UVDispatcherServlet extends HttpServlet {
 
     //5、初始化HandlerMapping，根据url映射不同的controller方法
     private void doMapping() {
-        if (IOC.isEmpty()) {
+        if (IOCByType.isEmpty() && IOCByName.isEmpty()) {
             return;
         }
-        for (Entry<String, Object> entry : IOC.entrySet()) {
+        for (Entry<String, Object> entry : IOCByType.entrySet()) {
             Class<?> clazz = entry.getValue().getClass();
             //判断是否是controller
             if (!clazz.isAnnotationPresent(UVController.class)) {
@@ -218,12 +230,12 @@ public class UVDispatcherServlet extends HttpServlet {
                 methodHandler.setMethod(method);
                 try {
                     //放入方法所在的controller
-                    methodHandler.setObject(clazz.newInstance());
+                    methodHandler.setObject(entry.getValue());
                 } catch (Exception e) {
                     e.printStackTrace();
                 }
                 //放入方法的参数列表
-                List<String> params = doParamHandler(method, methodHandler);
+                List<String> params = doParamHandler(method);
                 methodHandler.setParams(params);
                 urlHandler.put(url, methodHandler);
             }
@@ -259,12 +271,7 @@ public class UVDispatcherServlet extends HttpServlet {
             String parameter = request.getParameter(param);
             args.add(parameter);
         }
-        //参数列表是否是否有model对象
-        UVModel model = new UVModel();
-        if (methodHandler.getModelIndex() != -1) {
-            //将model对象注入到参数中
-            args.set(methodHandler.getModelIndex(), model);
-        }
+
         try {
             //执行方法，处理，返回结果
             Object result = method.invoke(object, args.toArray());
@@ -272,10 +279,6 @@ public class UVDispatcherServlet extends HttpServlet {
             if (jsonResult) {
                 writer.write(JSON.toJSONString(object));
             } else { //返回视图
-                //如果存在model,则处理model存的值,将其写入request域中
-                if (methodHandler.getModelIndex() != -1) {
-                    doModelHandler(model, request);
-                }
                 doResolveView((String) result, request, response);
             }
         } catch (Exception e) {
@@ -306,41 +309,17 @@ public class UVDispatcherServlet extends HttpServlet {
         return String.valueOf(chars);
     }
 
-    //处理method的参数
+
     /**
-     在Java 8之前的版本，代码编译为class文件后，方法参数的类型是固定的，但参数名称却丢失了，
-     这和动态语言严重依赖参数名称形成了鲜明对比。
-     现在，Java 8开始在class文件中保留参数名，给反射带来了极大的便利。
-     但是！！！！换成JDK8以后，也配置了编辑器，但是参数名始终不对，所以就暂时所有参数使用用@UVRequestParam
+     * 在Java 8之前的版本，代码编译为class文件后，方法参数的类型是固定的，但参数名称却丢失了， 这和动态语言严重依赖参数名称形成了鲜明对比。 现在，Java 8开始在class文件中保留参数名，给反射带来了极大的便利。 使用reflections包，jdk7和jdk8都可用
      **/
-    private List<String> doParamHandler(Method method, MethodHandler methodHandler) {
+    //处理method的参数
+    private List<String> doParamHandler(Method method) {
+        //使用reflections进行参数名的获取
+        Reflections reflections = new Reflections(new MethodParameterNamesScanner());
         //参数名与顺序对应
-        List<String> params = new ArrayList<>();
-        Parameter[] parameters = method.getParameters();
-        for (int i = 0; i < parameters.length; i++) {
-            //是否有UVRequestParam注解修饰，如果有这是用注解定义的参数名，否则使用原参数名
-            if (parameters[i].isAnnotationPresent(UVRequestParam.class)) {
-                String paramName = parameters[i].getAnnotation(UVRequestParam.class).value().trim();
-                params.add(paramName);
-            } else {
-                params.add(parameters[i].getName());
-            }
-            try {
-                //如果参数列表中有UVmodel对象，记录索引
-                if (parameters[i].getType().isInstance(new UVModel())) {
-                    methodHandler.setModelIndex(i);
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }
-        return params;
+        List<String> paramNames = reflections.getMethodParamNames(method);
+        return paramNames;
     }
 
-    //处理model对象,放入request域中
-    private void doModelHandler(UVModel model, HttpServletRequest request) {
-        for (Entry<String, Object> entry : model.entrySet()) {
-            request.setAttribute(entry.getKey(), entry.getValue());
-        }
-    }
 }

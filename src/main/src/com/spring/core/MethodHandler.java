@@ -1,6 +1,6 @@
 package com.spring.core;
 /*
- * @author liuwei
+ * @author uv
  * @date 2018/9/30 10:33
  *
  */
@@ -18,6 +18,4 @@ public class MethodHandler {
     private Method method;
     //参数顺序
     private List<String> params;
-    //参数列表中是否有UVModel，如果有则modelIndex为参数列表的索引，否则为-1
-    private Integer modelIndex = -1;
 }
